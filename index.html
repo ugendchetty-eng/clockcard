@@ -53,8 +53,7 @@
 
 <script>
   // Paste the Apps Script web app URL here (ends in /exec)
-    const API_URL = 'https://script.google.com/macros/s/AKfycbx7IniPyBsAl3M1bU9RyWyXgh2IdczTyWs6QIJKd-Gmacvvr6reNTrf93UeTXiSiUau/exec'; API_URL = 'PASTE_YOUR_WEB_APP_URL_HERE';
-
+    const API_URL = 'https://script.google.com/macros/s/AKfycbx7IniPyBsAl3M1bU9RyWyXgh2IdczTyWs6QIJKd-Gmacvvr6reNTrf93UeTXiSiUau/exec'; 
   const token = new URLSearchParams(location.search).get('t');
   const $ = (id) => document.getElementById(id);
   let sites = [], pos = null, role = '', ready = false, busy = false, userPicked = false;
