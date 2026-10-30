@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1f2937">
+<title>Clock Card</title>
+<style>
+  :root { --bg:#f3f4f6; --card:#fff; --text:#111827; --muted:#6b7280; --in:#15803d; --out:#b91c1c; --warn:#b45309; --line:#d1d5db; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:480px; margin:0 auto; padding:16px; }
+  h1 { font-size:1.5rem; margin:8px 0 4px; }
+  h2 { font-size:1.1rem; margin:0 0 6px; }
+  .muted { color:var(--muted); font-size:.95rem; margin:0 0 12px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin:12px 0; }
+  label { display:block; font-weight:600; margin:10px 0 6px; }
+  select, input { width:100%; font-size:1rem; padding:12px; border:1px solid var(--line); border-radius:8px; background:#fff; }
+  button { font:inherit; cursor:pointer; }
+  .big { display:block; width:100%; border:0; border-radius:14px; color:#fff; font-size:1.6rem; font-weight:700; padding:26px 0; margin:12px 0; }
+  .in { background:var(--in); } .out { background:var(--out); }
+  .mid { width:100%; border:0; border-radius:10px; background:#1f2937; color:#fff; font-size:1.1rem; padding:14px 0; margin-top:10px; }
+  .link { background:none; border:0; color:#2563eb; padding:8px 0 0; text-decoration:underline; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  #gps.ok { color:var(--in); } #gps.warn { color:var(--warn); }
+  #msg { min-height:1.5em; font-weight:600; padding:4px 2px; }
+  #msg.ok { color:var(--in); } #msg.warn { color:var(--warn); } #msg.err { color:var(--out); }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="hello">Clock Card</h1>
+  <p id="last" class="muted">Loading…</p>
+
+  <section class="card">
+    <div id="gps" class="muted">Finding your location…</div>
+    <label for="site">Job site</label>
+    <select id="site"></select>
+    <button id="refresh" class="link" type="button">Refresh location</button>
+  </section>
+
+  <button id="btnIn" class="big in" type="button" disabled>CLOCK IN</button>
+  <button id="btnOut" class="big out" type="button" disabled>CLOCK OUT</button>
+  <div id="msg" role="status"></div>
+
+  <section id="mgr" class="card" hidden>
+    <h2>Save this spot as a new site</h2>
+    <p class="muted">Stand at the main work area of the site. Wait until accuracy is under 30 m (tap Refresh location), then save.</p>
+    <input id="newSite" maxlength="60" placeholder="Site name, e.g. Umhlanga Block C" autocomplete="off">
+    <button id="btnAdd" class="mid" type="button" disabled>Save site</button>
+  </section>
+</main>
+
+<script>
+  // Paste the Apps Script web app URL here (ends in /exec)
+  const API_URL = 'PASTE_YOUR_WEB_APP_URL_HERE';
+
+  const token = new URLSearchParams(location.search).get('t');
+  const $ = (id) => document.getElementById(id);
+  let sites = [], pos = null, role = '', ready = false, busy = false, userPicked = false;
+
+  function show(text, kind) { $('msg').textContent = text; $('msg').className = kind || ''; }
+
+  function distM(lat1, lon1, lat2, lon2) {
+    const R = 6371000, r = Math.PI / 180;
+    const dLat = (lat2 - lat1) * r, dLon = (lon2 - lon1) * r;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(a));
+  }
+  const fmtDist = (m) => m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(1) + ' km';
+
+  function fillSites() {
+    const sel = $('site');
+    const prev = sel.value;
+    sel.innerHTML = '';
+    const list = sites.map((s) => Object.assign({}, s, { d: pos ? distM(pos.lat, pos.lng, s.lat, s.lng) : null }));
+    if (pos) list.sort((a, b) => a.d - b.d);
+    list.forEach((s) => {
+      const o = document.createElement('option');
+      o.value = s.name;
+      o.textContent = s.name + (s.d != null ? ' (' + fmtDist(s.d) + ')' : '');
+      sel.appendChild(o);
+    });
+    const none = document.createElement('option');
+    none.value = '';
+    none.textContent = 'Not at a listed site';
+    sel.appendChild(none);
+
+    if (userPicked && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
+    else if (pos && list.length && list[0].d <= list[0].radius) sel.value = list[0].name;
+    else sel.value = '';
+  }
+
+  function updateButtons() {
+    const can = ready && pos && !busy;
+    $('btnIn').disabled = !can;
+    $('btnOut').disabled = !can;
+    $('btnAdd').disabled = !can || !$('newSite').value.trim();
+  }
+
+  function setLast(l) {
+    $('last').textContent = l
+      ? 'Today: ' + (l.action === 'IN' ? 'clocked in' : 'clocked out') + ' at ' + l.time + ' – ' + l.site
+      : 'Not clocked in yet today.';
+  }
+
+  function locate() {
+    return new Promise((resolve, reject) => {
+      if (!navigator.geolocation) {
+        $('gps').textContent = 'This browser cannot share location.';
+        $('gps').className = 'warn';
+        return reject(new Error('Location not supported on this phone.'));
+      }
+      $('gps').textContent = 'Finding your location…';
+      $('gps').className = 'muted';
+      navigator.geolocation.getCurrentPosition((p) => {
+        pos = { lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy), at: Date.now() };
+        $('gps').textContent = 'Location found – accurate to about ' + pos.acc + ' m';
+        $('gps').className = pos.acc > 100 ? 'warn' : 'ok';
+        fillSites();
+        updateButtons();
+        resolve(pos);
+      }, (err) => {
+        const t = err.code === 1
+          ? 'Location is blocked. Allow location for this page in your browser settings, then tap Refresh location.'
+          : 'Could not get your location. Check that Location/GPS is on, then tap Refresh location.';
+        $('gps').textContent = t;
+        $('gps').className = 'warn';
+        reject(new Error(t));
+      }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+    });
+  }
+
+  async function send(action) {
+    if (busy) return;
+    if (action !== 'ADD_SITE') {
+      const sel = $('site');
+      const siteText = sel.value ? sel.value : 'an unlisted location';
+      if (!confirm('Clock ' + action + ' at ' + siteText + '?')) return;
+    }
+    busy = true; updateButtons(); show('Sending…');
+    try {
+      if (!pos || Date.now() - pos.at > 60000) await locate();   // fresh fix if older than 1 minute
+      const body = { t: token, action: action, lat: pos.lat, lng: pos.lng, acc: pos.acc };
+      if (action === 'ADD_SITE') body.siteName = $('newSite').value.trim();
+      else body.site = $('site').value;
+
+      const r = await fetch(API_URL, { method: 'POST', body: JSON.stringify(body) });
+      const res = await r.json();
+      if (!res.ok) throw new Error(res.error || 'Something went wrong.');
+
+      show(res.message, res.flags && res.flags.length ? 'warn' : 'ok');
+      if (res.last) setLast(res.last);
+      if (res.sites) { sites = res.sites; $('newSite').value = ''; userPicked = false; fillSites(); }
+    } catch (e) {
+      show(e instanceof TypeError ? 'No connection – check your data and try again.' : e.message, 'err');
+    }
+    busy = false; updateButtons();
+  }
+
+  async function init() {
+    if (!token) { $('last').textContent = ''; show('This link is missing your personal code. Ask the office for your link.', 'err'); return; }
+    locate().catch(() => {});
+    try {
+      const r = await fetch(API_URL + '?action=init&t=' + encodeURIComponent(token));
+      const res = await r.json();
+      if (!res.ok) { $('last').textContent = ''; show(res.error, 'err'); return; }
+      $('hello').textContent = 'Hi ' + res.name;
+      role = String(res.role || '').toLowerCase();
+      sites = res.sites || [];
+      if (role === 'manager') $('mgr').hidden = false;
+      setLast(res.last);
+      ready = true;
+      fillSites();
+      updateButtons();
+    } catch (e) {
+      $('last').textContent = '';
+      show('No connection – check your data and reload the page.', 'err');
+    }
+  }
+
+  $('btnIn').addEventListener('click', () => send('IN'));
+  $('btnOut').addEventListener('click', () => send('OUT'));
+  $('btnAdd').addEventListener('click', () => send('ADD_SITE'));
+  $('refresh').addEventListener('click', () => locate().catch(() => {}));
+  $('site').addEventListener('change', () => { userPicked = true; });
+  $('newSite').addEventListener('input', updateButtons);
+  init();
+</script>
+</body>
+</html>
