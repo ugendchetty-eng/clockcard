@@ -53,10 +53,11 @@
 
 <script>
   // Paste the Apps Script web app URL here (ends in /exec)
-    const API_URL = 'https://script.google.com/macros/s/AKfycbx7IniPyBsAl3M1bU9RyWyXgh2IdczTyWs6QIJKd-Gmacvvr6reNTrf93UeTXiSiUau/exec'; 
+  const API_URL = 'https://script.google.com/macros/s/AKfycbx7IniPyBsAl3M1bU9RyWyXgh2IdczTyWs6QIJKd-Gmacvvr6reNTrf93UeTXiSiUau/exec';
+
   const token = new URLSearchParams(location.search).get('t');
   const $ = (id) => document.getElementById(id);
-  let sites = [], pos = null, role = '', ready = false, busy = false, userPicked = false;
+  let sites = [], pos = null, role = '', ready = false, busy = false, userPicked = false, lastSeen = null;
 
   function show(text, kind) { $('msg').textContent = text; $('msg').className = kind || ''; }
 
@@ -98,6 +99,7 @@
   }
 
   function setLast(l) {
+    lastSeen = l || null;
     $('last').textContent = l
       ? 'Today: ' + (l.action === 'IN' ? 'clocked in' : 'clocked out') + ' at ' + l.time + ' – ' + l.site
       : 'Not clocked in yet today.';
@@ -137,32 +139,74 @@
       const siteText = sel.value ? sel.value : 'an unlisted location';
       if (!confirm('Clock ' + action + ' at ' + siteText + '?')) return;
     }
-    busy = true; updateButtons(); show('Sending…');
+    busy = true; updateButtons();
+    const before = lastSeen;
+    let sent = false;
     try {
-      if (!pos || Date.now() - pos.at > 60000) await locate();   // fresh fix if older than 1 minute
+      if (!pos || Date.now() - pos.at > 60000) {            // fresh fix if older than 1 minute
+        show('Getting your location…');
+        await locate();
+      }
       const body = { t: token, action: action, lat: pos.lat, lng: pos.lng, acc: pos.acc };
       if (action === 'ADD_SITE') body.siteName = $('newSite').value.trim();
       else body.site = $('site').value;
 
-      const r = await fetch(API_URL, { method: 'POST', body: JSON.stringify(body) });
-      const res = await r.json();
+      show('Sending…');
+      sent = true;
+      const res = await fetchJson(API_URL, { method: 'POST', body: JSON.stringify(body) }, 30000);
       if (!res.ok) throw new Error(res.error || 'Something went wrong.');
 
       show(res.message, res.flags && res.flags.length ? 'warn' : 'ok');
       if (res.last) setLast(res.last);
       if (res.sites) { sites = res.sites; $('newSite').value = ''; userPicked = false; fillSites(); }
     } catch (e) {
-      show(e instanceof TypeError ? 'No connection – check your data and try again.' : e.message, 'err');
+      if (sent && action !== 'ADD_SITE' && (e.name === 'AbortError' || e instanceof TypeError || e instanceof SyntaxError)) {
+        // The reply got lost or was too slow – check whether it saved anyway
+        show('No reply yet – checking whether it saved…', 'warn');
+        const now = await refreshLast();
+        if (now && now.action === action && (!before || now.time !== before.time || now.action !== before.action)) {
+          show('Saved: clocked ' + action + ' at ' + now.time + ' – ' + now.site + '. No need to tap again.', 'ok');
+        } else if (now) {
+          show('It did not save. Please tap CLOCK ' + action + ' again.', 'err');
+        } else {
+          show('No connection. Do NOT tap again yet – reload the page in a minute to see if it saved.', 'err');
+        }
+      } else {
+        show(e instanceof TypeError || e.name === 'AbortError' ? 'No connection – check your data and try again.' : e.message, 'err');
+      }
     }
     busy = false; updateButtons();
+  }
+
+  // fetch with a time limit, returning parsed JSON
+  async function fetchJson(url, opts, ms) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ms);
+    try {
+      const r = await fetch(url, Object.assign({}, opts, { signal: ctrl.signal }));
+      return await r.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // re-reads today's last entry from the sheet; returns it, or null if it can't connect
+  async function refreshLast() {
+    try {
+      const res = await fetchJson(API_URL + '?action=init&t=' + encodeURIComponent(token), {}, 20000);
+      if (!res.ok) return null;
+      setLast(res.last);
+      return res.last || { action: '', time: '', site: '' };
+    } catch (e) {
+      return null;
+    }
   }
 
   async function init() {
     if (!token) { $('last').textContent = ''; show('This link is missing your personal code. Ask the office for your link.', 'err'); return; }
     locate().catch(() => {});
     try {
-      const r = await fetch(API_URL + '?action=init&t=' + encodeURIComponent(token));
-      const res = await r.json();
+      const res = await fetchJson(API_URL + '?action=init&t=' + encodeURIComponent(token), {}, 30000);
       if (!res.ok) { $('last').textContent = ''; show(res.error, 'err'); return; }
       $('hello').textContent = 'Hi ' + res.name;
       role = String(res.role || '').toLowerCase();
