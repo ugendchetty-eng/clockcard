@@ -25,6 +25,26 @@
   #gps.ok { color:var(--in); } #gps.warn { color:var(--warn); }
   #msg { min-height:1.5em; font-weight:600; padding:4px 2px; }
   #msg.ok { color:var(--in); } #msg.warn { color:var(--warn); } #msg.err { color:var(--out); }
+  #dlg { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; padding:16px; z-index:10; }
+  #dlg[hidden] { display:none; }
+  #dlg .box { background:var(--card); border-radius:14px; padding:18px; width:100%; max-width:440px; max-height:90vh; overflow:auto; }
+  #dlg h2 { font-size:1.25rem; margin:0 0 6px; }
+  .opt { display:flex; align-items:center; gap:10px; padding:12px; border:1px solid var(--line); border-radius:10px; margin:8px 0; font-weight:600; }
+  .opt input { width:auto; margin:0; transform:scale(1.3); }
+  textarea { width:100%; font:inherit; font-size:1rem; padding:12px; border:1px solid var(--line); border-radius:8px; min-height:70px; margin-top:6px; }
+  .row { display:flex; gap:10px; margin-top:14px; }
+  .row button { flex:1; border:0; border-radius:10px; padding:14px 0; font-size:1.1rem; font-weight:700; }
+  .cancel { background:#e5e7eb; color:#111827; } .ok-in { background:var(--in); color:#fff; } .ok-out { background:var(--out); color:#fff; }
+  #dlgErr { color:var(--out); font-weight:600; min-height:1.2em; margin-top:6px; }
+  .pill { display:inline-block; padding:3px 10px; border-radius:999px; font-weight:700; font-size:.9rem; }
+  .p-Pending { background:#fce5cd; color:#7c2d12; } .p-Approved { background:#d9ead3; color:#14532d; } .p-Declined { background:#f4cccc; color:#7f1d1d; }
+  .req { border:1px solid var(--line); border-radius:10px; padding:12px; margin:10px 0; }
+  .req b { font-size:1.05rem; }
+  .req .row { margin-top:10px; }
+  .req select { margin-top:8px; }
+  .approve { background:var(--in); color:#fff; } .decline { background:var(--out); color:#fff; }
+  #otMsg, #apMsg { font-weight:600; min-height:1.2em; margin-top:8px; }
+  #otMsg.ok, #apMsg.ok { color:var(--in); } #otMsg.err, #apMsg.err { color:var(--out); }
 </style>
 </head>
 <body>
@@ -43,6 +63,23 @@
   <button id="btnOut" class="big out" type="button" disabled>CLOCK OUT</button>
   <div id="msg" role="status"></div>
 
+  <section id="otCard" class="card" hidden>
+    <h2>Overtime today</h2>
+    <p id="otStatus" class="muted">No overtime requested. Normal finish is 17:00.</p>
+    <label for="otUntil">Work until</label>
+    <select id="otUntil"></select>
+    <label for="otReason">Reason</label>
+    <input id="otReason" maxlength="200" placeholder="e.g. Finish concrete pour" autocomplete="off">
+    <button id="btnOt" class="mid" type="button">Request overtime</button>
+    <div id="otMsg"></div>
+  </section>
+
+  <section id="apCard" class="card" hidden>
+    <h2>Overtime to approve</h2>
+    <div id="apList"></div>
+    <div id="apMsg"></div>
+  </section>
+
   <section id="mgr" class="card" hidden>
     <h2>Save this spot as a new site</h2>
     <p class="muted">Stand at the main work area of the site. Wait until accuracy is under 30 m (tap Refresh location), then save.</p>
@@ -51,6 +88,20 @@
   </section>
 </main>
 
+<div id="dlg" hidden>
+  <div class="box" role="dialog" aria-modal="true" aria-labelledby="dlgTitle">
+    <h2 id="dlgTitle"></h2>
+    <p id="dlgText" class="muted"></p>
+    <div id="dlgReasons"></div>
+    <textarea id="dlgOther" placeholder="Please type the reason" maxlength="200" hidden></textarea>
+    <div id="dlgErr"></div>
+    <div class="row">
+      <button id="dlgCancel" class="cancel" type="button">Cancel</button>
+      <button id="dlgOk" type="button">Confirm</button>
+    </div>
+  </div>
+</div>
+
 <script>
   // Paste the Apps Script web app URL here (ends in /exec)
   const API_URL = 'https://script.google.com/macros/s/AKfycbx7IniPyBsAl3M1bU9RyWyXgh2IdczTyWs6QIJKd-Gmacvvr6reNTrf93UeTXiSiUau/exec';
@@ -58,6 +109,74 @@
   const token = new URLSearchParams(location.search).get('t');
   const $ = (id) => document.getElementById(id);
   let sites = [], pos = null, role = '', ready = false, busy = false, userPicked = false, lastSeen = null;
+  let cfg = { tz: 'Africa/Johannesburg', start: '08:00', end: '17:00', grace: 5, workDays: [1, 2, 3, 4, 5], maxOt: '20:00' };
+
+  const REASONS = {
+    LATE: ['Traffic', 'Transport problem', 'Was at another site first', 'Approved by supervisor', 'Other'],
+    EARLY: ['Family emergency', 'Medical / sick', 'Sent home by supervisor', 'Job finished / site closed', 'Going to another site', 'Other'],
+  };
+
+  // Current time and weekday in South Africa, whatever the phone's settings
+  function nowLocal() {
+    const parts = {};
+    new Intl.DateTimeFormat('en-GB', { timeZone: cfg.tz, hour: '2-digit', minute: '2-digit', hour12: false, weekday: 'short' })
+      .formatToParts(new Date()).forEach((p) => { parts[p.type] = p.value; });
+    const day = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 }[parts.weekday];
+    return { hhmm: (parts.hour === '24' ? '00' : parts.hour) + ':' + parts.minute, day: day };
+  }
+  function addMin(hhmm, m) {
+    const [h, mm] = hhmm.split(':').map(Number);
+    const t = h * 60 + mm + m;
+    return String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0');
+  }
+
+  // Confirmation box; asks for a reason when clocking in late or out early. Resolves to {ok, reason}.
+  function askConfirm(action, siteText) {
+    const n = nowLocal();
+    const workDay = cfg.workDays.indexOf(n.day) >= 0;
+    let kind = '';
+    if (workDay && action === 'IN' && !lastSeen && n.hhmm > addMin(cfg.start, cfg.grace)) kind = 'LATE';
+    if (workDay && action === 'OUT' && n.hhmm < cfg.end) kind = 'EARLY';
+
+    $('dlgTitle').textContent = 'Clock ' + action + ' at ' + n.hhmm + '?';
+    $('dlgText').textContent = 'Site: ' + siteText + (kind === 'LATE' ? '. Start time is ' + cfg.start + ' – please give a reason.'
+      : kind === 'EARLY' ? '. Finish time is ' + cfg.end + ' – please give a reason for leaving early.' : '');
+    $('dlgOk').className = action === 'IN' ? 'ok-in' : 'ok-out';
+    $('dlgOk').textContent = 'Clock ' + action;
+    $('dlgErr').textContent = '';
+    $('dlgOther').value = '';
+    $('dlgOther').hidden = true;
+    const box = $('dlgReasons');
+    box.innerHTML = '';
+    (REASONS[kind] || []).forEach((r) => {
+      const l = document.createElement('label');
+      l.className = 'opt';
+      const i = document.createElement('input');
+      i.type = 'radio'; i.name = 'reason'; i.value = r;
+      i.addEventListener('change', () => { $('dlgOther').hidden = r !== 'Other'; $('dlgErr').textContent = ''; if (r === 'Other') $('dlgOther').focus(); });
+      l.appendChild(i);
+      l.appendChild(document.createTextNode(r));
+      box.appendChild(l);
+    });
+    $('dlg').hidden = false;
+
+    return new Promise((resolve) => {
+      const done = (res) => { $('dlg').hidden = true; $('dlgOk').onclick = null; $('dlgCancel').onclick = null; resolve(res); };
+      $('dlgCancel').onclick = () => done({ ok: false });
+      $('dlgOk').onclick = () => {
+        if (!kind) return done({ ok: true, reason: '' });
+        const picked = box.querySelector('input[name=reason]:checked');
+        if (!picked) { $('dlgErr').textContent = 'Please choose a reason.'; return; }
+        let reason = picked.value;
+        if (reason === 'Other') {
+          const txt = $('dlgOther').value.trim();
+          if (txt.length < 3) { $('dlgErr').textContent = 'Please type the reason.'; return; }
+          reason = 'Other: ' + txt;
+        }
+        done({ ok: true, reason: reason });
+      };
+    });
+  }
 
   function show(text, kind) { $('msg').textContent = text; $('msg').className = kind || ''; }
 
@@ -134,10 +253,13 @@
 
   async function send(action) {
     if (busy) return;
+    let reason = '';
     if (action !== 'ADD_SITE') {
       const sel = $('site');
-      const siteText = sel.value ? sel.value : 'an unlisted location';
-      if (!confirm('Clock ' + action + ' at ' + siteText + '?')) return;
+      const siteText = sel.value ? sel.value : 'not at a listed site';
+      const ans = await askConfirm(action, siteText);
+      if (!ans.ok) return;
+      reason = ans.reason;
     }
     busy = true; updateButtons();
     const before = lastSeen;
@@ -149,7 +271,7 @@
       }
       const body = { t: token, action: action, lat: pos.lat, lng: pos.lng, acc: pos.acc };
       if (action === 'ADD_SITE') body.siteName = $('newSite').value.trim();
-      else body.site = $('site').value;
+      else { body.site = $('site').value; body.reason = reason; }
 
       show('Sending…');
       sent = true;
@@ -158,6 +280,7 @@
 
       show(res.message, res.flags && res.flags.length ? 'warn' : 'ok');
       if (res.last) setLast(res.last);
+      if ('ot' in res) setOt(res.ot);
       if (res.sites) { sites = res.sites; $('newSite').value = ''; userPicked = false; fillSites(); }
     } catch (e) {
       if (sent && action !== 'ADD_SITE' && (e.name === 'AbortError' || e instanceof TypeError || e instanceof SyntaxError)) {
@@ -211,7 +334,12 @@
       $('hello').textContent = 'Hi ' + res.name;
       role = String(res.role || '').toLowerCase();
       sites = res.sites || [];
-      if (role === 'manager') $('mgr').hidden = false;
+      if (res.cfg) cfg = Object.assign(cfg, res.cfg);
+      fillOtTimes();
+      setOt(res.ot);
+      $('otCard').hidden = false;
+      setApprovals(res.approvals || [], role === 'manager' || role === 'director');
+      if (res.canAddSites || role === 'manager') $('mgr').hidden = false;
       setLast(res.last);
       ready = true;
       fillSites();
@@ -222,6 +350,93 @@
     }
   }
 
+  /* ---------- Overtime ---------- */
+  function timeOptions(selected) {
+    const out = [];
+    for (let t = addMin(cfg.end, 30); t <= cfg.maxOt; t = addMin(t, 30)) out.push(t);
+    return out.map((t) => '<option' + (t === selected ? ' selected' : '') + '>' + t + '</option>').join('');
+  }
+  function fillOtTimes() { $('otUntil').innerHTML = timeOptions(addMin(cfg.end, 60)); }
+
+  function setOt(ot) {
+    const el = $('otStatus');
+    if (!ot) { el.textContent = 'No overtime requested. Normal finish is ' + cfg.end + '.'; return; }
+    el.innerHTML = '';
+    const pill = document.createElement('span');
+    pill.className = 'pill p-' + ot.status;
+    pill.textContent = ot.status;
+    el.appendChild(pill);
+    el.appendChild(document.createTextNode(
+      ot.approvedUntil && ot.status !== 'Approved' ? ' Latest request until ' + ot.until + '. Already approved until ' + ot.approvedUntil + '.'
+      : ot.status === 'Approved' ? ' You may work until ' + ot.until + '. You will be clocked out automatically then.'
+      : ot.status === 'Declined' ? ' Not approved – please clock out by ' + cfg.end + '.'
+      : ' Until ' + ot.until + ' – waiting for your supervisor.'));
+  }
+
+  async function requestOt() {
+    const until = $('otUntil').value, reason = $('otReason').value.trim();
+    if (reason.length < 3) { $('otMsg').textContent = 'Please type a short reason.'; $('otMsg').className = 'err'; return; }
+    $('btnOt').disabled = true; $('otMsg').textContent = 'Sending…'; $('otMsg').className = '';
+    try {
+      const res = await fetchJson(API_URL, { method: 'POST', body: JSON.stringify({ t: token, action: 'OT_REQUEST', until: until, reason: reason }) }, 30000);
+      if (!res.ok) throw new Error(res.error);
+      setOt(res.ot);
+      $('otReason').value = '';
+      $('otMsg').textContent = res.message; $('otMsg').className = 'ok';
+    } catch (e) {
+      $('otMsg').textContent = e instanceof TypeError || e.name === 'AbortError' ? 'No connection – try again.' : e.message;
+      $('otMsg').className = 'err';
+    }
+    $('btnOt').disabled = false;
+  }
+
+  function setApprovals(list, isManager) {
+    $('apCard').hidden = !(list.length || isManager);
+    const box = $('apList');
+    box.innerHTML = '';
+    if (!list.length) { box.innerHTML = '<p class="muted">No overtime requests from your team today.</p>'; return; }
+    list.forEach((r) => {
+      const d = document.createElement('div');
+      d.className = 'req';
+      const head = document.createElement('div');
+      const b = document.createElement('b'); b.textContent = r.name;
+      const pill = document.createElement('span'); pill.className = 'pill p-' + r.status; pill.textContent = r.status;
+      head.append(b, ' ', pill);
+      const info = document.createElement('div');
+      info.className = 'muted';
+      info.textContent = 'Until ' + r.until + ' – ' + r.reason;
+      d.append(head, info);
+      if (r.status === 'Pending') {
+        const sel = document.createElement('select');
+        sel.innerHTML = timeOptions(r.until);
+        const row = document.createElement('div'); row.className = 'row';
+        const no = document.createElement('button'); no.type = 'button'; no.className = 'decline'; no.textContent = 'Decline';
+        const yes = document.createElement('button'); yes.type = 'button'; yes.className = 'approve'; yes.textContent = 'Approve';
+        no.onclick = () => decide(r.id, 'Declined', '');
+        yes.onclick = () => decide(r.id, 'Approved', sel.value);
+        row.append(no, yes);
+        d.append(sel, row);
+      }
+      box.appendChild(d);
+    });
+  }
+
+  async function decide(id, decision, until) {
+    $('apMsg').textContent = 'Saving…'; $('apMsg').className = '';
+    $('apList').querySelectorAll('button').forEach((b) => { b.disabled = true; });
+    try {
+      const res = await fetchJson(API_URL, { method: 'POST', body: JSON.stringify({ t: token, action: 'OT_DECIDE', id: id, decision: decision, until: until }) }, 30000);
+      if (!res.ok) throw new Error(res.error);
+      setApprovals(res.approvals || [], true);
+      $('apMsg').textContent = res.message; $('apMsg').className = 'ok';
+    } catch (e) {
+      $('apMsg').textContent = e instanceof TypeError || e.name === 'AbortError' ? 'No connection – try again.' : e.message;
+      $('apMsg').className = 'err';
+      $('apList').querySelectorAll('button').forEach((b) => { b.disabled = false; });
+    }
+  }
+
+  $('btnOt').addEventListener('click', requestOt);
   $('btnIn').addEventListener('click', () => send('IN'));
   $('btnOut').addEventListener('click', () => send('OUT'));
   $('btnAdd').addEventListener('click', () => send('ADD_SITE'));
