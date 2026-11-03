@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#1f2937">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Clock Card">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" href="icon-192.png">
 <title>Clock Card</title>
 <style>
   :root { --bg:#f3f4f6; --card:#fff; --text:#111827; --muted:#6b7280; --in:#15803d; --out:#b91c1c; --warn:#b45309; --line:#d1d5db; }
@@ -45,12 +50,21 @@
   .approve { background:var(--in); color:#fff; } .decline { background:var(--out); color:#fff; }
   #otMsg, #apMsg { font-weight:600; min-height:1.2em; margin-top:8px; }
   #otMsg.ok, #apMsg.ok { color:var(--in); } #otMsg.err, #apMsg.err { color:var(--out); }
+  .notif { border-color:#2563eb; background:#eff6ff; }
+  .notif .mid { background:#2563eb; }
+  #pushOk { color:var(--in); font-size:.9rem; margin:0 0 8px; }
 </style>
 </head>
 <body>
 <main>
   <h1 id="hello">Clock Card</h1>
   <p id="last" class="muted">Loading…</p>
+
+  <section id="notif" class="card notif" hidden>
+    <h2>Turn on reminders</h2>
+    <p id="notifText" class="muted">Get a reminder on this phone if you forget to clock in or out.</p>
+    <button id="btnNotif" class="mid" type="button">Turn on reminders</button>
+  </section>
 
   <section class="card">
     <div id="gps" class="muted">Finding your location…</div>
@@ -106,7 +120,19 @@
   // Paste the Apps Script web app URL here (ends in /exec)
   const API_URL = 'https://script.google.com/macros/s/AKfycbx7IniPyBsAl3M1bU9RyWyXgh2IdczTyWs6QIJKd-Gmacvvr6reNTrf93UeTXiSiUau/exec';
 
-  const token = new URLSearchParams(location.search).get('t');
+
+  // Paste your OneSignal App ID here (OneSignal → Settings → Keys & IDs). Leave as is to switch reminders off.
+  const ONESIGNAL_APP_ID = '035a75dc-12aa-452a-973a-999be4817b30';
+
+  // Personal code from the link; remembered on this phone in case the home-screen icon opens without it
+  const token = (function () {
+    let t = new URLSearchParams(location.search).get('t');
+    try {
+      if (t) localStorage.setItem('clockcard_t', t);
+      else t = localStorage.getItem('clockcard_t');
+    } catch (e) {}
+    return t;
+  })();
   const $ = (id) => document.getElementById(id);
   let sites = [], pos = null, role = '', ready = false, busy = false, userPicked = false, lastSeen = null;
   let cfg = { tz: 'Africa/Johannesburg', start: '08:00', end: '17:00', grace: 5, workDays: [1, 2, 3, 4, 5], maxOt: '20:00' };
@@ -344,6 +370,7 @@
       ready = true;
       fillSites();
       updateButtons();
+      setupPush(token);
     } catch (e) {
       $('last').textContent = '';
       show('No connection – check your data and reload the page.', 'err');
@@ -435,6 +462,84 @@
       $('apList').querySelectorAll('button').forEach((b) => { b.disabled = false; });
     }
   }
+
+  /* ---------- Reminders (push notifications via OneSignal) ---------- */
+  let OS = null;
+  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+
+  function setupPush(tok) {
+    if (ONESIGNAL_APP_ID.indexOf('PASTE_') === 0) return;      // not configured yet
+    window.OneSignalDeferred = window.OneSignalDeferred || [];
+    window.OneSignalDeferred.push(async function (OneSignal) {
+      try {
+        const base = location.pathname.replace(/[^/]*$/, '');   // e.g. /clockcard/
+        await OneSignal.init({
+          appId: ONESIGNAL_APP_ID,
+          serviceWorkerPath: base.slice(1) + 'push/OneSignalSDKWorker.js',
+          serviceWorkerParam: { scope: base + 'push/' },
+        });
+        OS = OneSignal;
+        await OneSignal.login(tok);                          // links this phone to the worker's code
+        OneSignal.Notifications.addEventListener('permissionChange', showPushState);
+        OneSignal.User.PushSubscription.addEventListener('change', showPushState);
+      } catch (e) {
+        console.log('Reminders setup failed', e);
+      }
+      showPushState();
+    });
+    const s = document.createElement('script');
+    s.src = 'https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js';
+    s.defer = true;
+    document.head.appendChild(s);
+  }
+
+  function showPushState() {
+    const card = $('notif'), txt = $('notifText'), btn = $('btnNotif');
+    if (!OS) {
+      // OneSignal could not start – most likely an iPhone not opened from the home screen
+      if (isIOS && !navigator.standalone) {
+        card.hidden = false; btn.hidden = true;
+        txt.textContent = 'To get reminders on iPhone: tap the Share button, choose "Add to Home Screen", then open Clock Card from your home screen.';
+      }
+      return;
+    }
+    if (!OS.Notifications.isPushSupported()) {
+      card.hidden = false; btn.hidden = true;
+      txt.textContent = isIOS
+        ? 'To get reminders on iPhone: tap the Share button, choose "Add to Home Screen", then open Clock Card from your home screen. If it is already on your home screen, delete that icon and add it again.'
+        : 'This browser cannot show reminders. Open your link in Chrome.';
+      return;
+    }
+    if (OS.Notifications.permission && OS.User.PushSubscription.optedIn) {
+      card.hidden = true;
+      if (!$('pushOk')) {
+        const p = document.createElement('p');
+        p.id = 'pushOk';
+        p.textContent = '✓ Reminders are on for this phone';
+        $('last').after(p);
+      }
+      return;
+    }
+    card.hidden = false; btn.hidden = false;
+    if (typeof Notification !== 'undefined' && Notification.permission === 'denied') {
+      btn.hidden = true;
+      txt.textContent = 'Reminders are blocked on this phone. Allow notifications for this page in your phone or browser settings, then reload the page.';
+      return;
+    }
+    txt.textContent = 'Get a reminder on this phone if you forget to clock in or out.';
+  }
+
+  $('btnNotif').addEventListener('click', async () => {
+    if (!OS) return;
+    $('btnNotif').disabled = true;
+    try {
+      await OS.User.PushSubscription.optIn();                // asks for permission if needed
+    } catch (e) {
+      console.log('Opt-in failed', e);
+    }
+    $('btnNotif').disabled = false;
+    showPushState();
+  });
 
   $('btnOt').addEventListener('click', requestOt);
   $('btnIn').addEventListener('click', () => send('IN'));
