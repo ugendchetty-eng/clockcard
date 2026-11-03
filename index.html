@@ -66,6 +66,12 @@
     <button id="btnNotif" class="mid" type="button">Turn on reminders</button>
   </section>
 
+  <section id="install" class="card notif" hidden>
+    <h2>Add to your home screen</h2>
+    <p class="muted">Put Clock Card on your home screen so it opens with one tap.</p>
+    <button id="btnInstall" class="mid" type="button">Add to home screen</button>
+  </section>
+
   <section class="card">
     <div id="gps" class="muted">Finding your location…</div>
     <label for="site">Job site</label>
@@ -465,10 +471,30 @@
 
   /* ---------- Reminders (push notifications via OneSignal) ---------- */
   let OS = null;
-  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+  const UA = navigator.userAgent;
+  const isIOS = /iPhone|iPad|iPod/.test(UA);
+  const isAndroid = /Android/i.test(UA);
+  // Real Chrome on Android – not Samsung Internet, WhatsApp/Facebook in-app browsers, Edge, Opera or Firefox
+  const isAndroidChrome = isAndroid && /Chrome\/\d/.test(UA) &&
+    !/SamsungBrowser|; wv\)|EdgA|OPR|Firefox|FBAN|FBAV|Instagram|MiuiBrowser|HuaweiBrowser/i.test(UA);
+
+  // Link that makes Android open this same page (with the worker's code) in Chrome
+  function chromeLink(tok) {
+    const path = location.host + location.pathname + '?t=' + encodeURIComponent(tok);
+    return 'intent://' + path + '#Intent;scheme=https;package=com.android.chrome;' +
+      'S.browser_fallback_url=' + encodeURIComponent('https://play.google.com/store/apps/details?id=com.android.chrome') + ';end';
+  }
 
   function setupPush(tok) {
     if (ONESIGNAL_APP_ID.indexOf('PASTE_') === 0) return;      // not configured yet
+    if (isAndroid && !isAndroidChrome) {                       // e.g. opened from WhatsApp in Samsung Internet
+      const card = $('notif');
+      card.hidden = false;
+      $('notifText').textContent = 'Reminders only work in Chrome. Tap below to open your clock card in Chrome, then tap Turn on reminders there.';
+      $('btnNotif').textContent = 'Open in Chrome';
+      $('btnNotif').dataset.chrome = chromeLink(tok);
+      return;
+    }
     window.OneSignalDeferred = window.OneSignalDeferred || [];
     window.OneSignalDeferred.push(async function (OneSignal) {
       try {
@@ -518,6 +544,7 @@
         p.textContent = '✓ Reminders are on for this phone';
         $('last').after(p);
       }
+      showInstall();
       return;
     }
     card.hidden = false; btn.hidden = false;
@@ -529,7 +556,28 @@
     txt.textContent = 'Get a reminder on this phone if you forget to clock in or out.';
   }
 
+  /* ---------- Add to home screen (Chrome on Android) ---------- */
+  let installPrompt = null;
+  const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; showInstall(); });
+  window.addEventListener('appinstalled', () => { installPrompt = null; $('install').hidden = true; });
+
+  function showInstall() {
+    // only offer it once reminders are on, and only where Chrome lets us
+    const remindersOn = OS && OS.Notifications.permission && OS.User.PushSubscription.optedIn;
+    $('install').hidden = !(installPrompt && remindersOn && !isStandalone());
+  }
+
+  $('btnInstall').addEventListener('click', async () => {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    try { await installPrompt.userChoice; } catch (e) {}
+    installPrompt = null;
+    $('install').hidden = true;
+  });
+
   $('btnNotif').addEventListener('click', async () => {
+    if ($('btnNotif').dataset.chrome) { location.href = $('btnNotif').dataset.chrome; return; }
     if (!OS) return;
     $('btnNotif').disabled = true;
     try {
