@@ -27,6 +27,7 @@
   .mid { width:100%; border:0; border-radius:10px; background:#1f2937; color:#fff; font-size:1.1rem; padding:14px 0; margin-top:10px; }
   .link { background:none; border:0; color:#2563eb; padding:8px 0 0; text-decoration:underline; }
   button:disabled { opacity:.45; cursor:not-allowed; }
+  .big:disabled { background:#9ca3af; opacity:1; }
   #gps.ok { color:var(--in); } #gps.warn { color:var(--warn); }
   #msg { min-height:1.5em; font-weight:600; padding:4px 2px; }
   #msg.ok { color:var(--in); } #msg.warn { color:var(--warn); } #msg.err { color:var(--out); }
@@ -242,10 +243,13 @@
     else sel.value = '';
   }
 
+  // Only the button that makes sense right now is active:
+  // clocked in -> only CLOCK OUT; not in yet / clocked out (incl. 17:00 auto clock-out) -> only CLOCK IN
   function updateButtons() {
     const can = ready && pos && !busy;
-    $('btnIn').disabled = !can;
-    $('btnOut').disabled = !can;
+    const isIn = !!(lastSeen && lastSeen.action === 'IN');
+    $('btnIn').disabled = !can || isIn;
+    $('btnOut').disabled = !can || !isIn;
     $('btnAdd').disabled = !can || !$('newSite').value.trim();
   }
 
@@ -351,6 +355,7 @@
       const res = await fetchJson(API_URL + '?action=init&t=' + encodeURIComponent(token), {}, 20000);
       if (!res.ok) return null;
       setLast(res.last);
+      if ('ot' in res) setOt(res.ot);
       return res.last || { action: '', time: '', site: '' };
     } catch (e) {
       return null;
@@ -382,6 +387,17 @@
       show('No connection – check your data and reload the page.', 'err');
     }
   }
+
+  // When the page is opened again from the home screen, re-check the status
+  // (e.g. after the 17:00 auto clock-out) so the right button is active
+  let lastCheck = 0;
+  document.addEventListener('visibilitychange', async () => {
+    if (document.hidden || !ready || busy) return;
+    if (Date.now() - lastCheck < 30000) return;             // don't re-check more than every 30 s
+    lastCheck = Date.now();
+    await refreshLast();
+    updateButtons();
+  });
 
   /* ---------- Overtime ---------- */
   function timeOptions(selected) {
