@@ -31,10 +31,20 @@
   #gps.ok { color:var(--in); } #gps.warn { color:var(--warn); }
   #msg { min-height:1.5em; font-weight:600; padding:4px 2px; }
   #msg.ok { color:var(--in); } #msg.warn { color:var(--warn); } #msg.err { color:var(--out); }
-  #dlg { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; padding:16px; z-index:10; }
-  #dlg[hidden] { display:none; }
-  #dlg .box { background:var(--card); border-radius:14px; padding:18px; width:100%; max-width:440px; max-height:90vh; overflow:auto; }
-  #dlg h2 { font-size:1.25rem; margin:0 0 6px; }
+  #dlg, #lvDlg { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; padding:16px; z-index:10; }
+  #dlg[hidden], #lvDlg[hidden] { display:none; }
+  #dlg .box, #lvDlg .box { background:var(--card); border-radius:14px; padding:18px; width:100%; max-width:440px; max-height:90vh; overflow:auto; }
+  #dlg h2, #lvDlg h2 { font-size:1.25rem; margin:0 0 6px; }
+  .big.off { background:#475569; font-size:1.25rem; padding:18px 0; }
+  .big[hidden] { display:none; }
+  .ok-off { background:#475569; color:#fff; }
+  .off-card { border-color:#93c5fd; background:#eff6ff; }
+  .dates { display:flex; gap:10px; }
+  .dates > div { flex:1; }
+  #lvErr { color:var(--out); font-weight:600; min-height:1.2em; margin-top:6px; }
+  #lvMsg, #lvApMsg { font-weight:600; min-height:1.2em; margin-top:8px; }
+  #lvMsg.ok, #lvApMsg.ok { color:var(--in); } #lvMsg.err, #lvApMsg.err { color:var(--out); }
+  .p-Cancelled { background:#e5e7eb; color:#374151; }
   .opt { display:flex; align-items:center; gap:10px; padding:12px; border:1px solid var(--line); border-radius:10px; margin:8px 0; font-weight:600; }
   .opt input { width:auto; margin:0; transform:scale(1.3); }
   textarea { width:100%; font:inherit; font-size:1rem; padding:12px; border:1px solid var(--line); border-radius:8px; min-height:70px; margin-top:6px; }
@@ -82,7 +92,14 @@
 
   <button id="btnIn" class="big in" type="button" disabled>CLOCK IN</button>
   <button id="btnOut" class="big out" type="button" disabled>CLOCK OUT</button>
+  <button id="btnOff" class="big off" type="button" hidden>NOT WORKING TODAY</button>
   <div id="msg" role="status"></div>
+
+  <section id="offCard" class="card off-card" hidden>
+    <h2 id="offTitle"></h2>
+    <p id="offText" class="muted"></p>
+    <button id="btnOffCancel" class="link" type="button">I am working today after all – cancel this</button>
+  </section>
 
   <section id="otCard" class="card" hidden>
     <h2>Overtime today</h2>
@@ -99,6 +116,19 @@
     <h2>Overtime to approve</h2>
     <div id="apList"></div>
     <div id="apMsg"></div>
+  </section>
+
+  <section id="lvCard" class="card" hidden>
+    <h2>My days off</h2>
+    <div id="lvList"></div>
+    <button id="btnLvAdd" class="mid" type="button">Book a day off</button>
+    <div id="lvMsg"></div>
+  </section>
+
+  <section id="lvApCard" class="card" hidden>
+    <h2>Days off to confirm</h2>
+    <div id="lvApList"></div>
+    <div id="lvApMsg"></div>
   </section>
 
   <section id="mgr" class="card" hidden>
@@ -123,6 +153,25 @@
   </div>
 </div>
 
+<div id="lvDlg" hidden>
+  <div class="box" role="dialog" aria-modal="true" aria-labelledby="lvTitle">
+    <h2 id="lvTitle">Not working today</h2>
+    <p class="muted">Your supervisor will be asked to confirm. You won't get clock-in reminders on these days.</p>
+    <div class="dates">
+      <div><label for="lvFrom">From</label><input type="date" id="lvFrom"></div>
+      <div><label for="lvTo">To</label><input type="date" id="lvTo"></div>
+    </div>
+    <label>Reason</label>
+    <div id="lvTypes"></div>
+    <textarea id="lvNote" placeholder="Note (optional)" maxlength="200"></textarea>
+    <div id="lvErr"></div>
+    <div class="row">
+      <button id="lvCancel" class="cancel" type="button">Cancel</button>
+      <button id="lvOk" class="ok-off" type="button">Send</button>
+    </div>
+  </div>
+</div>
+
 <script>
   // Paste the Apps Script web app URL here (ends in /exec)
   const API_URL = 'https://script.google.com/macros/s/AKfycbx7IniPyBsAl3M1bU9RyWyXgh2IdczTyWs6QIJKd-Gmacvvr6reNTrf93UeTXiSiUau/exec';
@@ -142,6 +191,7 @@
   })();
   const $ = (id) => document.getElementById(id);
   let sites = [], pos = null, role = '', ready = false, busy = false, userPicked = false, lastSeen = null;
+  let leaveOn = false, offToday = null, myLeave = [];   // day off / leave (needs Code.gs version 4)
   let cfg = { tz: 'Africa/Johannesburg', start: '08:00', end: '17:00', grace: 5, workDays: [1, 2, 3, 4, 5], maxOt: '20:00' };
 
   const REASONS = {
@@ -173,7 +223,8 @@
 
     $('dlgTitle').textContent = 'Clock ' + action + ' at ' + n.hhmm + '?';
     $('dlgText').textContent = 'Site: ' + siteText + (kind === 'LATE' ? '. Start time is ' + cfg.start + ' – please give a reason.'
-      : kind === 'EARLY' ? '. Finish time is ' + cfg.end + ' – please give a reason for leaving early.' : '');
+      : kind === 'EARLY' ? '. Finish time is ' + cfg.end + ' – please give a reason for leaving early.' : '') +
+      (action === 'IN' && offToday ? ' You marked today as ' + offToday.type.toLowerCase() + ' – clocking in will be noted for your supervisor.' : '');
     $('dlgOk').className = action === 'IN' ? 'ok-in' : 'ok-out';
     $('dlgOk').textContent = 'Clock ' + action;
     $('dlgErr').textContent = '';
@@ -251,6 +302,9 @@
     $('btnIn').disabled = !can || isIn;
     $('btnOut').disabled = !can || !isIn;
     $('btnAdd').disabled = !can || !$('newSite').value.trim();
+    // "Not working today": only before clocking anything today, on a work day, when not already marked off
+    $('btnOff').hidden = !ready || !leaveOn || !!lastSeen || !!offToday || cfg.workDay === false;
+    $('btnOff').disabled = busy;
   }
 
   function setLast(l) {
@@ -356,6 +410,7 @@
       if (!res.ok) return null;
       setLast(res.last);
       if ('ot' in res) setOt(res.ot);
+      if ('leave' in res) { setLeave(res.offToday, res.leave); setLeaveApprovals(res.leaveApprovals || []); }
       return res.last || { action: '', time: '', site: '' };
     } catch (e) {
       return null;
@@ -378,6 +433,8 @@
       setApprovals(res.approvals || [], role === 'manager' || role === 'director');
       if (res.canAddSites || role === 'manager') $('mgr').hidden = false;
       setLast(res.last);
+      leaveOn = 'leave' in res;                              // false until Code.gs version 4 is deployed
+      if (leaveOn) { setLeave(res.offToday, res.leave); setLeaveApprovals(res.leaveApprovals || []); }
       ready = true;
       fillSites();
       updateButtons();
@@ -484,6 +541,195 @@
       $('apList').querySelectorAll('button').forEach((b) => { b.disabled = false; });
     }
   }
+
+  /* ---------- Day off / leave ---------- */
+  const LV_LABEL = { Pending: 'Waiting', Approved: 'Confirmed', Declined: 'Declined', Cancelled: 'Cancelled' };
+  const netErr = (e) => e instanceof TypeError || e.name === 'AbortError';
+
+  function lvPill(status) {
+    const p = document.createElement('span');
+    p.className = 'pill p-' + status;
+    p.textContent = LV_LABEL[status] || status;
+    return p;
+  }
+  // today's date (yyyy-mm-dd) in South Africa, from the server if it sent it
+  function todayLocal() {
+    return cfg.today || new Intl.DateTimeFormat('en-CA', { timeZone: cfg.tz }).format(new Date());
+  }
+  function addDays(day, n) {
+    const d = new Date(day + 'T12:00:00Z');
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  }
+
+  function setLeave(today, list) {
+    offToday = today || null;
+    myLeave = list || [];
+
+    // banner for today
+    if (offToday) {
+      $('offCard').hidden = false;
+      $('offTitle').textContent = '🏖️ Off today – ' + offToday.type;
+      const t = $('offText');
+      t.innerHTML = '';
+      t.append(lvPill(offToday.status), ' ' +
+        (offToday.status === 'Pending' ? 'Waiting for your supervisor to confirm.' : 'Confirmed by your supervisor.') +
+        (offToday.to !== offToday.from ? ' (' + offToday.days + ')' : '') +
+        (offToday.note ? ' Note: ' + offToday.note : ''));
+      $('btnOffCancel').hidden = offToday.from < todayLocal();   // leave that started earlier: office changes it
+    } else {
+      $('offCard').hidden = true;
+    }
+
+    // list of booked days off
+    const box = $('lvList');
+    box.innerHTML = '';
+    if (!myLeave.length) box.innerHTML = '<p class="muted">No days off booked.</p>';
+    myLeave.forEach((l) => {
+      const d = document.createElement('div');
+      d.className = 'req';
+      const head = document.createElement('div');
+      const b = document.createElement('b'); b.textContent = l.days;
+      head.append(b, ' ', lvPill(l.status));
+      const info = document.createElement('div');
+      info.className = 'muted';
+      info.textContent = l.type + (l.note ? ' – ' + l.note : '');
+      d.append(head, info);
+      if ((l.status === 'Pending' || l.status === 'Approved') && l.from >= todayLocal()) {
+        const c = document.createElement('button');
+        c.type = 'button'; c.className = 'link'; c.textContent = 'Cancel this day off';
+        c.onclick = () => cancelLeave(l);
+        d.append(c);
+      }
+      box.appendChild(d);
+    });
+    $('lvCard').hidden = false;
+    $('otCard').hidden = !!offToday && !lastSeen;          // no overtime on a day off
+    updateButtons();
+  }
+
+  // the "Not working today" / "Book a day off" box
+  function openLeave(fromToday) {
+    const today = todayLocal();
+    const first = fromToday || !lastSeen ? today : addDays(today, 1);   // already clocked today -> start tomorrow
+    $('lvTitle').textContent = fromToday ? 'Not working today' : 'Book a day off';
+    ['lvFrom', 'lvTo'].forEach((id) => { $(id).min = first; $(id).max = addDays(today, cfg.leaveDaysAhead || 30); });
+    $('lvFrom').value = fromToday ? today : first;
+    $('lvTo').value = $('lvFrom').value;
+    $('lvNote').value = '';
+    $('lvNote').placeholder = 'Note (optional)';
+    $('lvErr').textContent = '';
+    const box = $('lvTypes');
+    box.innerHTML = '';
+    (cfg.leaveTypes || ['Day off', 'Annual leave', 'Sick', 'Family responsibility', 'Other']).forEach((t) => {
+      const l = document.createElement('label');
+      l.className = 'opt';
+      const i = document.createElement('input');
+      i.type = 'radio'; i.name = 'lvType'; i.value = t;
+      i.addEventListener('change', () => {
+        $('lvErr').textContent = '';
+        $('lvNote').placeholder = t === 'Other' ? 'Please type the reason' : 'Note (optional)';
+        if (t === 'Other') $('lvNote').focus();
+      });
+      l.append(i, document.createTextNode(t));
+      box.appendChild(l);
+    });
+    $('lvDlg').hidden = false;
+  }
+
+  $('lvFrom').addEventListener('change', () => {
+    if (!$('lvTo').value || $('lvTo').value < $('lvFrom').value) $('lvTo').value = $('lvFrom').value;
+  });
+  $('lvCancel').addEventListener('click', () => { $('lvDlg').hidden = true; });
+
+  $('lvOk').addEventListener('click', async () => {
+    const err = (t) => { $('lvErr').textContent = t; };
+    const picked = $('lvTypes').querySelector('input[name=lvType]:checked');
+    if (!picked) return err('Please choose a reason.');
+    const note = $('lvNote').value.trim();
+    if (picked.value === 'Other' && note.length < 3) return err('Please type the reason.');
+    const from = $('lvFrom').value, to = $('lvTo').value || from;
+    if (!from) return err('Please choose the date.');
+    if (to < from) return err('The last day must be on or after the first day.');
+
+    $('lvOk').disabled = true;
+    err('');
+    $('lvOk').textContent = 'Sending…';
+    try {
+      const res = await fetchJson(API_URL, { method: 'POST', body: JSON.stringify({
+        t: token, action: 'LEAVE_REQUEST', from: from, to: to, type: picked.value, note: note }) }, 30000);
+      if (!res.ok) throw new Error(res.error || 'Something went wrong.');
+      $('lvDlg').hidden = true;
+      setLeave(res.offToday, res.leave);
+      show(res.message, 'ok');
+    } catch (e) {
+      err(netErr(e) ? 'No connection – try again. (If it already saved, it will say so.)' : e.message);
+    }
+    $('lvOk').disabled = false;
+    $('lvOk').textContent = 'Send';
+  });
+
+  async function cancelLeave(l) {
+    if (!confirm('Cancel your ' + l.type.toLowerCase() + ' for ' + l.days + '?')) return;
+    $('lvMsg').textContent = 'Cancelling…'; $('lvMsg').className = '';
+    try {
+      const res = await fetchJson(API_URL, { method: 'POST', body: JSON.stringify({ t: token, action: 'LEAVE_CANCEL', id: l.id }) }, 30000);
+      if (!res.ok) throw new Error(res.error || 'Something went wrong.');
+      setLeave(res.offToday, res.leave);
+      $('lvMsg').textContent = res.message; $('lvMsg').className = 'ok';
+    } catch (e) {
+      $('lvMsg').textContent = netErr(e) ? 'No connection – try again.' : e.message;
+      $('lvMsg').className = 'err';
+    }
+  }
+
+  // supervisors: days off from their team to confirm
+  function setLeaveApprovals(list) {
+    $('lvApCard').hidden = !list.length;
+    const box = $('lvApList');
+    box.innerHTML = '';
+    list.forEach((l) => {
+      const d = document.createElement('div');
+      d.className = 'req';
+      const head = document.createElement('div');
+      const b = document.createElement('b'); b.textContent = l.name;
+      head.append(b, ' ', lvPill(l.status));
+      const info = document.createElement('div');
+      info.className = 'muted';
+      info.textContent = l.days + ' – ' + l.type + (l.note ? ' – ' + l.note : '');
+      d.append(head, info);
+      if (l.status === 'Pending') {
+        const row = document.createElement('div'); row.className = 'row';
+        const no = document.createElement('button'); no.type = 'button'; no.className = 'decline'; no.textContent = 'Decline';
+        const yes = document.createElement('button'); yes.type = 'button'; yes.className = 'approve'; yes.textContent = 'Confirm';
+        no.onclick = () => decideLeave(l.id, 'Declined');
+        yes.onclick = () => decideLeave(l.id, 'Approved');
+        row.append(no, yes);
+        d.append(row);
+      }
+      box.appendChild(d);
+    });
+  }
+
+  async function decideLeave(id, decision) {
+    $('lvApMsg').textContent = 'Saving…'; $('lvApMsg').className = '';
+    $('lvApList').querySelectorAll('button').forEach((b) => { b.disabled = true; });
+    try {
+      const res = await fetchJson(API_URL, { method: 'POST', body: JSON.stringify({ t: token, action: 'LEAVE_DECIDE', id: id, decision: decision }) }, 30000);
+      if (!res.ok) throw new Error(res.error || 'Something went wrong.');
+      setLeaveApprovals(res.leaveApprovals || []);
+      $('lvApCard').hidden = false;
+      $('lvApMsg').textContent = res.message; $('lvApMsg').className = 'ok';
+    } catch (e) {
+      $('lvApMsg').textContent = netErr(e) ? 'No connection – try again.' : e.message;
+      $('lvApMsg').className = 'err';
+      $('lvApList').querySelectorAll('button').forEach((b) => { b.disabled = false; });
+    }
+  }
+
+  $('btnOff').addEventListener('click', () => openLeave(true));
+  $('btnLvAdd').addEventListener('click', () => openLeave(false));
+  $('btnOffCancel').addEventListener('click', () => { if (offToday) cancelLeave(offToday); });
 
   /* ---------- Reminders (push notifications via OneSignal) ---------- */
   let OS = null;
