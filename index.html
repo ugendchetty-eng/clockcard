@@ -37,6 +37,13 @@
   #dlg h2, #lvDlg h2 { font-size:1.25rem; margin:0 0 6px; }
   .big.off { background:#475569; font-size:1.2rem; padding:16px 0; margin-top:0; }
   .big[hidden] { display:none; }
+  /* Day off box: compact, with Cancel / Send always visible at the bottom */
+  #lvDlg .box { padding-bottom:0; }
+  #lvDlg .muted { margin-bottom:6px; }
+  #lvDlg label { margin:8px 0 4px; }
+  #lvDlg .opt { padding:9px 12px; margin:6px 0; }
+  #lvDlg textarea { min-height:48px; }
+  #lvDlg .row { position:sticky; bottom:0; background:var(--card); padding:10px 0 16px; margin-top:8px; }
   .ok-off { background:#475569; color:#fff; }
   .off-card { border-color:#93c5fd; background:#eff6ff; }
   .dates { display:flex; gap:10px; }
@@ -728,8 +735,28 @@
     }
   }
 
-  // today if they haven't clocked in yet on a work day, otherwise starting tomorrow
-  $('btnOff').addEventListener('click', () => openLeave(!lastSeen && cfg.workDay !== false));
+  // DAY OFF: one tap marks today as a day off – no options. Booking other days is done with "Book a day off".
+  async function markDayOff() {
+    if (busy) return;
+    if (lastSeen) {
+      show('You have already clocked in today, so today can\'t be a day off. To book another day, use "Book a day off" further down.', 'warn');
+      return;
+    }
+    if (!confirm('Mark today as your day off?')) return;
+    busy = true; updateButtons(); show('Sending…');
+    try {
+      const today = todayLocal();
+      const res = await fetchJson(API_URL, { method: 'POST', body: JSON.stringify({
+        t: token, action: 'LEAVE_REQUEST', from: today, to: today, type: 'Day off', note: '' }) }, 30000);
+      if (!res.ok) throw new Error(res.error || 'Something went wrong.');
+      setLeave(res.offToday, res.leave);
+      show('Today is marked as your day off. You won\'t get a clock-in reminder today.', 'ok');
+    } catch (e) {
+      show(netErr(e) ? 'No connection – try again.' : e.message, 'err');
+    }
+    busy = false; updateButtons();
+  }
+  $('btnOff').addEventListener('click', markDayOff);
   $('btnLvAdd').addEventListener('click', () => openLeave(false));
   $('btnOffCancel').addEventListener('click', () => { if (offToday) cancelLeave(offToday); });
 
